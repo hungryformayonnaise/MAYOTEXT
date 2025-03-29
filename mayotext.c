@@ -1,8 +1,13 @@
 /*** INCLUDES ***/
+#define _DEAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
@@ -19,21 +24,32 @@ enum editorKey {
 	ARROW_RIGHT,
 	ARROW_UP,
 	ARROW_DOWN,
+	DEL_KEY,
+	HOME_KEY,
+	END_KEY,
 	PAGE_UP,
 	PAGE_DOWN
 };
 
 /*** DATA ***/
 
+typedef struct erow {
+	int size;
+	char *chars;
+} erow;
+
 struct editorConfig {
 	int cx, cy; //tracking cursors x and y coordinates
+	int rowoff;
+	int coloff;
 	int screenrows;
 	int screencols;
+	int numrows;
+	erow *row;
 	struct termios orig_termios;
 };
 
 struct editorConfig E;
-
 
 
 /********TERMINAL*******/
@@ -86,8 +102,13 @@ int editorReadKey() {
 				if(read(STDIN_FILENO, &seq[2], 1)!=1) return '\x1b';
 				if(seq[2]=='~') {
 					switch(seq[1]) {
+						case '1': return HOME_KEY;
+						case '3': return DEL_KEY;
+						case '4': return END_KEY;
 						case '5': return PAGE_UP;
 						case '6': return PAGE_DOWN;
+						case '7': return HOME_KEY;
+						case '8': return END_KEY;
 					}
 				}
 			} else {
@@ -96,7 +117,14 @@ int editorReadKey() {
 					case 'B': return ARROW_DOWN;
 					case 'C': return ARROW_RIGHT;
 					case 'D': return ARROW_LEFT;
+					case 'H': return HOME_KEY;
+					case 'F': return END_KEY;
 				}
+			}
+		} else if (seq[0]=='O') {
+			switch(seq[1]) {
+				case 'H': return HOME_KEY;
+				case 'F': return END_KEY;
 			}
 		}
 		return '\x1b';
@@ -136,6 +164,36 @@ int getWindowSize(int *rows, int *cols){
 		return 0;
 	}
 }
+/*** ROW OPERATIONS ***/
+void editorAppendRow(char *s, size_t len) {
+	E.row=realloc(E.row, sizeof(erow)*(E.numrows+1));
+	
+	int at=E.numrows;
+	E.row[at].size=len;
+	E.row[at].chars=malloc(len+1);
+	memcpy(E.row[at].chars, s, len);
+	E.row[at].chars[len]='\0';
+	E.numrows++;
+}
+
+/*** FILE I/O ***/
+
+void editorOpen(char *filename) {
+	FILE *fp = fopen(filename, "r");
+	if(!fp) die("FAILED OPENING");
+	char *line = NULL;
+	size_t linecap=0;
+	ssize_t linelen;
+	linelen=getline(&line, &linecap, fp);
+	while((linelen=getline(&line, &linecap, fp))!=-1) {
+		while(linelen>0 && (line[linelen-1]=='\n' ||
+				    line[linelen-1]=='\r'))
+			linelen--;
+		editorAppendRow(line, linelen);
+	}
+	free(line);
+	fclose(fp);
+}
 
 /*** APPEND BUFFER ***/
 
@@ -161,15 +219,22 @@ void abFree(struct abuf *ab) {
 /*** INPUT ***/
 
 void editorMoveCursor(int key) {
+	erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
 	switch(key) {
 		case ARROW_LEFT:
 			if(E.cx!=0) {
 				E.cx--;
+			} else if (E.cy>0) {
+				E.cy--;
+				E.cx=E.row[E.cy].size;
 			}
 			break;
 		case ARROW_RIGHT:
-			if(E.cx!=E.screencols-1) {
+			if(row && E.cx<row->size) {
 				E.cx++;
+			} else if (row&&E.cx==row->size) {
+				E.cy++;
+				E.cx=0;
 			}
 			break;
 		case ARROW_UP:
@@ -178,10 +243,15 @@ void editorMoveCursor(int key) {
 			}
 			break;
 		case ARROW_DOWN:
-			if(E.cy!=E.screenrows-1) {
+			if(E.cy<E.numrows) {
 				E.cy++;
 			}
 			break;
+	}
+	row=(E.cy>=E.numrows) ? NULL : &E.row[E.cy];
+	int rowlen=row ? row -> size : 0;
+	if(E.cx>rowlen) {
+		E.cx=rowlen;
 	}
 }
 
@@ -193,6 +263,13 @@ void editorProcessKeypress() {
 			write(STDOUT_FILENO, "\x1b[2J", 4);
 			write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
+			break;
+		
+		case HOME_KEY:
+			E.cx=0;
+			break;
+		case END_KEY:
+			E.cx=E.screencols-1;
 			break;
 		
 		case PAGE_UP:
@@ -215,23 +292,47 @@ void editorProcessKeypress() {
 
 /*** OUTPUT ***/
 
+void editorScroll() {
+	if (E.cy<E.rowoff) {
+		E.rowoff=E.cy;
+	}
+	if(E.cy>=E.rowoff+E.screenrows) {
+		E.rowoff=E.cy-E.screenrows+1;
+	}
+	if(E.cx<E.coloff) {
+		E.coloff = E.cx;
+	}
+	if(E.cx>=E.coloff+E.screencols) {
+		E.coloff=E.cx-E.screencols+1;
+	}
+}
+
 void editorDrawRows(struct abuf *ab) {
 	int y;
+	int filerow;
 	for (y=0;y<E.screenrows;y++) {
-		if(y==E.screenrows/3) {
-			char welcome[80];
-			int welcomelen = snprintf(welcome, sizeof(welcome),
-			"MayoText -- version %s", VERSION);
-			if(welcomelen > E.screencols) welcomelen = E.screencols;
-			int padding=(E.screencols - welcomelen)/2;
-			if(padding) {
+		filerow=y+E.rowoff;
+		if(filerow>= E.numrows) {
+			if(E.numrows==0 && y==E.screenrows/3) {
+				char welcome[80];
+				int welcomelen = snprintf(welcome, sizeof(welcome),
+				"MayoText -- version %s", VERSION);
+				if(welcomelen > E.screencols) welcomelen = E.screencols;
+				int padding=(E.screencols - welcomelen)/2;
+				if(padding) {
+					abAppend(ab, "~", 1);
+					padding--;
+				}
+				while(padding--) abAppend(ab, " ", 1);
+				abAppend(ab, welcome, welcomelen);
+			} else {
 				abAppend(ab, "~", 1);
-				padding--;
 			}
-			while(padding--) abAppend(ab, " ", 1);
-			abAppend(ab, welcome, welcomelen);
 		} else {
-			abAppend(ab, "~", 1);
+			int len=E.row[filerow].size-E.coloff;
+			if(len<0) len=0;
+			if(len>E.screencols) len=E.screencols;
+			abAppend(ab, &E.row[filerow].chars[E.coloff], len);
 		}
 		abAppend(ab, "\x1b[K", 3);
 		if(y<E.screenrows-1) {
@@ -241,6 +342,7 @@ void editorDrawRows(struct abuf *ab) {
 }
 
 void editorRefreshScreen() {
+	editorScroll();
 	struct abuf ab=ABUF_INIT;
 	
 	abAppend(&ab, "\x1b[?25l", 6);
@@ -249,7 +351,7 @@ void editorRefreshScreen() {
 	editorDrawRows(&ab);
 	
 	char buf[32];
-	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy+1, E.cx+1);
+	snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1, (E.cx-E.coloff) + 1);
 	abAppend(&ab, buf, strlen(buf));
 	
 	abAppend(&ab, "\x1b[?25h", 6);
@@ -261,14 +363,21 @@ void editorRefreshScreen() {
 /*** INIT ***/
 
 void initEditor() {
-	E.cx = 0;
-	E.cy = 0;
+	E.cx=0;
+	E.cy=0;
+	E.rowoff=0;
+	E.coloff=0;
+	E.numrows=0;
+	E.row=NULL;
 	if(getWindowSize(&E.screenrows, &E.screencols)==-1) die("FAILED MEASURING");
 }
 
-int main() {
+int main(int argc, char * argv[]) {
 	enableRawMode();
 	initEditor();
+	if(argc>=2) {
+		editorOpen(argv[1]);
+	}
 	
 	while(1) {
 		editorRefreshScreen();
