@@ -203,6 +203,30 @@ bool isNewWord(erow *row, int at, int c) {
 	}
 	return false;
 }
+/*** TODO SEGFAULTS ***/
+bool willDeleteWord(erow *prevrow, erow *row, int at) { //at is the actual character that's being deleted
+	if(at==0) {
+		if(isalnum(row->chars[at])) {
+			if(prevrow) {
+				if(prevrow->size==0) return false;
+				if(isalnum(prevrow->chars[prevrow->size-1])) return true;
+				return false;
+			} else {
+				return false;
+			}
+		}
+	}
+	if(isalnum(row->chars[at])) {
+		if(at==row->size) {
+			if(isalnum(row->chars[at-1])) return false;
+			return true;
+		}
+		if(isalnum(row->chars[at-1])||(isalnum(row->chars[at+1]))) return false;
+		return true;
+	}
+	if(isalnum(row->chars[at-1])&&(isalnum(row->chars[at+1]))) return true;
+	return false;
+}
 
 int editorRowCxToRx(erow *row, int cx) {
 	int rx=0;
@@ -345,6 +369,9 @@ void editorDelChar() {
 	if(E.cy==E.numrows) return;
 	if (E.cx == 0 && E.cy == 0) return;
 	erow *row=&E.row[E.cy];
+	erow *prevrow;
+	if(E.cy==0) prevrow=NULL;
+	if(willDeleteWord(prevrow, row, E.cx-1));
 	if(E.cx>0) {
 		editorRowDelChar(row,E.cx-1);
 		E.cx--;
