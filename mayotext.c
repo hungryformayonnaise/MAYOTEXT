@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
@@ -56,6 +57,7 @@ struct editorConfig {
 	int numrows;
 	erow *row;
 	int dirty;
+	int wordcount;
 	char *filename;
 	char statusmsg[80];
 	time_t statusmsg_time;
@@ -276,6 +278,26 @@ void editorRowDelChar(erow *row, int at) {
 	E.dirty++;
 }
 
+int rowCountWords(erow row) {
+	if (row.size==1) return 0;
+	int sum=0;
+	char c;
+	bool word=false;
+	for(int at=0;at<row.size;at++) {
+		c=row.chars[at];
+		if(isalnum(c)) {
+			word=true;
+			continue;
+		}
+		if(word) {
+			sum++;
+			word=false;
+		}
+	}
+	if(word) sum++;
+	return sum;
+}
+
 /*** EDITOR OPERATIONS ***/
 
 void editorInsertChar(int c) {
@@ -316,6 +338,14 @@ void editorDelChar() {
 	}
 }
 
+int editorCountWords() {
+	int res=0;
+	for(int y=0;y<E.numrows-1;y++) {
+		res+=rowCountWords(E.row[y]);
+	}
+	return res;
+}
+
 /*** FILE I/O ***/
 
 char *editorRowsToString(int *buflen) {
@@ -342,6 +372,7 @@ void editorOpen(char *filename) {
 	free(E.filename);
 	E.filename=strdup(filename);
 
+	int words=0;
 	FILE *fp = fopen(filename, "r");
 	if(!fp) die("FAILED OPENING");
 	char *line = NULL;
@@ -352,9 +383,11 @@ void editorOpen(char *filename) {
 				    line[linelen-1]=='\r'))
 			linelen--;
 		editorInsertRow(E.numrows, line, linelen);
+		words+=rowCountWords(E.row[E.numrows-1]);
 	}
 	free(line);
 	fclose(fp);
+	E.wordcount=words;
 	E.dirty=0;
 }
 /*
@@ -617,7 +650,7 @@ void editorDrawStatusBar(struct abuf *ab) {
 	abAppend(ab, "\x1b[7m", 4);
 	char status[80], rstatus[80];
 	int len=snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[NO NAME YET :3]", E.numrows, E.dirty? "(MODIFIED)": "");
-	int rlen=snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy+1, E.numrows);
+	int rlen=snprintf(rstatus, sizeof(rstatus), "%d words, line %d/%d", E.wordcount, E.cy+1, E.numrows);
 	if(len>E.screencols) len=E.screencols;
 	abAppend(ab,status, len);
 	while(len<E.screencols) {
@@ -684,6 +717,7 @@ void initEditor() {
 	E.statusmsg_time=0;
 	if(getWindowSize(&E.screenrows, &E.screencols)==-1) die("FAILED MEASURING");
 	E.screenrows-=2;
+	E.wordcount=0;
 }
 
 int main(int argc, char * argv[]) {
