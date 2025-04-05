@@ -186,6 +186,24 @@ int getWindowSize(int *rows, int *cols){
 }
 /*** ROW OPERATIONS ***/
 
+bool isNewWord(erow *row, int at, int c) {
+	if(isalnum(c)) {
+		if(at==0) {
+			if(at==row->size-1) return true;
+			if(isalnum(row->chars[at+1])) return false;
+			return true;
+		}
+		if(at==row->size-1) {
+			if(isalnum(row->chars[at-1])) return false;
+			return true;
+		}
+		if(isalnum(row->chars[at-1])||isalnum(row->chars[at+1]))
+			return false;
+		return true;
+	}
+	return false;
+}
+
 int editorRowCxToRx(erow *row, int cx) {
 	int rx=0;
 	int j;
@@ -258,7 +276,7 @@ void editorRowInsertChar(erow *row, int at, int c) {
 	row->chars[at]=c;
 	editorUpdateRow(row);
 	E.dirty++;
-	
+	if(isNewWord(row, at, c)) E.wordcount++;
 }
 
 void editorRowAppendString(erow *row, char *s, size_t len) {
