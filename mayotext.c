@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
@@ -19,7 +20,7 @@
 /*** DEFINES ***/
 
 
-#define VERSION "0.0.1"
+#define VERSION "0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define TABSTOP 8
 #define QUITTIMES 2
@@ -56,6 +57,7 @@ struct editorConfig {
 	int numrows;
 	erow *row;
 	int dirty;
+	int wordcount;
 	char *filename;
 	char statusmsg[80];
 	time_t statusmsg_time;
@@ -68,6 +70,8 @@ struct editorConfig E;
 
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
+void initMainMenu();
+void initGamesMenu();
 char *editorPrompt(char *prompt);
 
 /********TERMINAL*******/
@@ -184,6 +188,63 @@ int getWindowSize(int *rows, int *cols){
 }
 /*** ROW OPERATIONS ***/
 
+bool isNewWord(erow *row, int at, int c) {
+	if(isalnum(c)) {
+		if(at==0) {
+			if(at==row->size-1) return true;
+			if(isalnum(row->chars[at+1])) return false;
+			return true;
+		}
+		if(at==row->size-1) {
+			if(isalnum(row->chars[at-1])) return false;
+			return true;
+		}
+		if(isalnum(row->chars[at-1])||isalnum(row->chars[at+1])) {
+			return false;
+		}
+		return true;
+	}
+
+		if(isalnum(row->chars[at-1])||isalnum(row->chars[at+1])) {
+			return ((isspace(c))&&(isalnum(row->chars[at-1])&&isalnum(row->chars[at+1])));
+		}
+	return false;
+}
+
+bool isNewWordNewline(erow *row, int at) { //at is guaranteed larger than 0
+	if(isalnum(row->chars[at])) {
+		if(isalnum(row->chars[at-1])) return true;
+	}
+	return false;
+}
+
+bool willDeleteWord(erow *prevrow, erow *row, int at) { //at is the actual character that's being deleted
+	if(at<=0) {
+		int atmod=at;
+		if(at<0) atmod=0;
+		if(isalnum(row->chars[atmod])) {
+			if(prevrow) {
+				if(prevrow->size==0) return false;
+				if(isalnum(prevrow->chars[prevrow->size-1])) return true;
+				return false;
+			} else {
+				return false;
+			}
+		}
+		return false;
+	}
+	if(isalnum(row->chars[at])) {
+		if(at==row->size) {
+			if(isalnum(row->chars[at-1])) return false;
+			return true;
+		}
+		if(isalnum(row->chars[at-1])||(isalnum(row->chars[at+1]))) return false;
+		return true;
+	}
+	if(isalnum(row->chars[at-1])&&(isalnum(row->chars[at+1]))) return true;
+	return false;
+}
+
 int editorRowCxToRx(erow *row, int cx) {
 	int rx=0;
 	int j;
@@ -256,7 +317,7 @@ void editorRowInsertChar(erow *row, int at, int c) {
 	row->chars[at]=c;
 	editorUpdateRow(row);
 	E.dirty++;
-	
+	if(isNewWord(row, at, c)) E.wordcount++;
 }
 
 void editorRowAppendString(erow *row, char *s, size_t len) {
@@ -276,6 +337,26 @@ void editorRowDelChar(erow *row, int at) {
 	E.dirty++;
 }
 
+int rowCountWords(erow row) {
+	if (row.size==1) return 0;
+	int sum=0;
+	char c;
+	bool word=false;
+	for(int at=0;at<row.size;at++) {
+		c=row.chars[at];
+		if(isalnum(c)) {
+			word=true;
+			continue;
+		}
+		if(word) {
+			sum++;
+			word=false;
+		}
+	}
+	if(word) sum++;
+	return sum;
+}
+
 /*** EDITOR OPERATIONS ***/
 
 void editorInsertChar(int c) {
@@ -286,11 +367,13 @@ void editorInsertChar(int c) {
 	E.cx++;
 }
 
+
 void editorInsertNewline() {
 	if(E.cx==0) {
 		editorInsertRow(E.cy, "", 0);
 	} else {
 		erow*row=&E.row[E.cy];
+		if(isNewWordNewline(row, E.cx)) E.wordcount++;
 		editorInsertRow(E.cy+1, &row->chars[E.cx], row->size-E.cx);
 		row=&E.row[E.cy];
 		row->size=E.cx;
@@ -305,6 +388,13 @@ void editorDelChar() {
 	if(E.cy==E.numrows) return;
 	if (E.cx == 0 && E.cy == 0) return;
 	erow *row=&E.row[E.cy];
+	erow *prevrow;
+	if(E.cy==0) {
+		prevrow=NULL;
+	} else {
+		prevrow=&E.row[E.cy-1];
+	}
+	if(willDeleteWord(prevrow, row, E.cx-1)) E.wordcount--;
 	if(E.cx>0) {
 		editorRowDelChar(row,E.cx-1);
 		E.cx--;
@@ -314,6 +404,14 @@ void editorDelChar() {
 		editorDelRow(E.cy);
 		E.cy--;
 	}
+}
+
+int editorCountWords() {
+	int res=0;
+	for(int y=0;y<E.numrows-1;y++) {
+		res+=rowCountWords(E.row[y]);
+	}
+	return res;
 }
 
 /*** FILE I/O ***/
@@ -342,6 +440,7 @@ void editorOpen(char *filename) {
 	free(E.filename);
 	E.filename=strdup(filename);
 
+	int words=0;
 	FILE *fp = fopen(filename, "r");
 	if(!fp) die("FAILED OPENING");
 	char *line = NULL;
@@ -352,9 +451,11 @@ void editorOpen(char *filename) {
 				    line[linelen-1]=='\r'))
 			linelen--;
 		editorInsertRow(E.numrows, line, linelen);
+		words+=rowCountWords(E.row[E.numrows-1]);
 	}
 	free(line);
 	fclose(fp);
+	E.wordcount=words;
 	E.dirty=0;
 }
 /*
@@ -617,7 +718,7 @@ void editorDrawStatusBar(struct abuf *ab) {
 	abAppend(ab, "\x1b[7m", 4);
 	char status[80], rstatus[80];
 	int len=snprintf(status, sizeof(status), "%.20s - %d lines %s", E.filename ? E.filename : "[NO NAME YET :3]", E.numrows, E.dirty? "(MODIFIED)": "");
-	int rlen=snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy+1, E.numrows);
+	int rlen=snprintf(rstatus, sizeof(rstatus), "%d words, line %d/%d", E.wordcount, E.cy+1, E.numrows);
 	if(len>E.screencols) len=E.screencols;
 	abAppend(ab,status, len);
 	while(len<E.screencols) {
@@ -668,6 +769,33 @@ void editorSetStatusMessage(const char *fmt, ...) {
 	E.statusmsg_time=time(NULL);
 }
 
+/*** MENU ***/
+
+void menuRefreshScreen() {
+	//TODO
+}
+
+void menuProcessKeypress() {
+	//TODO
+}
+
+void menuMain() {
+	initMainMenu();
+	while(1) {
+		menuRefreshScreen();
+		menuProcessKeypress();
+	}
+}
+
+void menuGames() {
+	initGamesMenu();
+	while(1) {
+		menuRefreshScreen();
+		menuProcessKeypress();
+	}
+}
+
+
 /*** INIT ***/
 
 void initEditor() {
@@ -684,10 +812,25 @@ void initEditor() {
 	E.statusmsg_time=0;
 	if(getWindowSize(&E.screenrows, &E.screencols)==-1) die("FAILED MEASURING");
 	E.screenrows-=2;
+	E.wordcount=0;
+}
+
+void initMainMenu() {
+	printf("\e[?25l"); //hide cursor
+
+}
+
+void initGamesMenu() {
+	printf("\e[?25l");
+
 }
 
 int main(int argc, char * argv[]) {
 	enableRawMode();
+
+	menuMain();
+
+	printf("\e[?25h"); //show cursor
 	initEditor();
 	if(argc>=2) {
 		editorOpen(argv[1]);
